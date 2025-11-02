@@ -22,6 +22,10 @@ pub async fn init_db(database_url: &str) -> Result<DbPool, sqlx::Error> {
         .execute(&pool)
         .await?;
 
+    sqlx::query(include_str!("../migrations/002_create_directories_table.sql"))
+        .execute(&pool)
+        .await?;
+
     info!("Database initialized successfully");
     Ok(pool)
 }

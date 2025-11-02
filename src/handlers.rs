@@ -1,15 +1,25 @@
-use crate::models::{DeleteResponse, ErrorResponse, FileResponse, ListFilesResponse, UploadResponse};
+use crate::models::{
+    BulkDeleteRequest, BulkDeleteResponse, CreateDirectoryRequest, CreateDirectoryResponse,
+    DeleteResponse, DirectoryResponse, ErrorResponse, FileResponse, ListFilesResponse,
+    UploadResponse,
+};
 use crate::storage::FileStorage;
 use axum::{
     body::Body,
-    extract::{Multipart, Path, State},
+    extract::{Multipart, Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
+use serde::Deserialize;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 use tracing::{error, info};
+
+#[derive(Debug, Deserialize)]
+pub struct ListQuery {
+    pub parent_directory_id: Option<String>,
+}
 
 // Upload file handler
 pub async fn upload_file(
@@ -20,6 +30,7 @@ pub async fn upload_file(
     let mut file_data = Vec::new();
     let mut mime_type: Option<String> = None;
     let mut description: Option<String> = None;
+    let mut parent_directory_id: Option<String> = None;
 
     while let Some(field) = multipart
         .next_field()
@@ -67,6 +78,20 @@ pub async fn upload_file(
                 })?;
                 description = Some(text);
             }
+            "parent_directory_id" => {
+                let text = field.text().await.map_err(|e| {
+                    error!("Failed to read parent_directory_id: {}", e);
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!("Failed to read parent_directory_id: {}", e),
+                        }),
+                    )
+                })?;
+                if !text.is_empty() {
+                    parent_directory_id = Some(text);
+                }
+            }
             _ => {}
         }
     }
@@ -81,7 +106,7 @@ pub async fn upload_file(
     }
 
     let metadata = storage
-        .save_file(&filename, &file_data, mime_type, description)
+        .save_file(&filename, &file_data, mime_type, description, parent_directory_id)
         .await
         .map_err(|e| {
             error!("Failed to save file: {}", e);
@@ -178,25 +203,67 @@ pub async fn download_file(
         .unwrap())
 }
 
-// List all files handler
+// List all files and directories handler
 pub async fn list_files(
     State(storage): State<FileStorage>,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<ListFilesResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let files = storage.list_files().await.map_err(|e| {
-        error!("Failed to list files: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to list files: {}", e),
-            }),
-        )
-    })?;
+    let files = storage
+        .list_files(query.parent_directory_id.clone())
+        .await
+        .map_err(|e| {
+            error!("Failed to list files: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to list files: {}", e),
+                }),
+            )
+        })?;
 
-    let total = files.len();
+    let directories = storage
+        .list_directories(query.parent_directory_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to list directories: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to list directories: {}", e),
+                }),
+            )
+        })?;
+
+    // Get stats for each directory
+    let mut directory_responses = Vec::new();
+    for dir in directories {
+        let (file_count, total_size) = storage.get_directory_stats(&dir.id).await.map_err(|e| {
+            error!("Failed to get directory stats: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get directory stats: {}", e),
+                }),
+            )
+        })?;
+
+        directory_responses.push(DirectoryResponse {
+            id: dir.id,
+            name: dir.name,
+            parent_id: dir.parent_id,
+            created_at: dir.created_at,
+            updated_at: dir.updated_at,
+            file_count,
+            total_size,
+        });
+    }
+
+    let total = files.len() + directory_responses.len();
     let file_responses: Vec<FileResponse> = files.into_iter().map(|f| f.into()).collect();
 
     Ok(Json(ListFilesResponse {
         files: file_responses,
+        directories: directory_responses,
         total,
     }))
 }
@@ -267,5 +334,162 @@ pub async fn health_check() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "healthy",
         "service": "file-transfer-api"
+    }))
+}
+
+// Create directory handler
+pub async fn create_directory(
+    State(storage): State<FileStorage>,
+    Json(payload): Json<CreateDirectoryRequest>,
+) -> Result<Json<CreateDirectoryResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let directory = storage
+        .create_directory(&payload.name, payload.parent_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to create directory: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to create directory: {}", e),
+                }),
+            )
+        })?;
+
+    let (file_count, total_size) = storage.get_directory_stats(&directory.id).await.map_err(|e| {
+        error!("Failed to get directory stats: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to get directory stats: {}", e),
+            }),
+        )
+    })?;
+
+    info!("Directory created: {}", directory.id);
+
+    Ok(Json(CreateDirectoryResponse {
+        success: true,
+        directory: DirectoryResponse {
+            id: directory.id,
+            name: directory.name,
+            parent_id: directory.parent_id,
+            created_at: directory.created_at,
+            updated_at: directory.updated_at,
+            file_count,
+            total_size,
+        },
+        message: "Directory created successfully".to_string(),
+    }))
+}
+
+// Get directory info handler
+pub async fn get_directory_info(
+    State(storage): State<FileStorage>,
+    Path(dir_id): Path<String>,
+) -> Result<Json<DirectoryResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let directory = storage
+        .get_directory(&dir_id)
+        .await
+        .map_err(|e| {
+            error!("Database error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Directory not found".to_string(),
+                }),
+            )
+        })?;
+
+    let (file_count, total_size) = storage.get_directory_stats(&dir_id).await.map_err(|e| {
+        error!("Failed to get directory stats: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to get directory stats: {}", e),
+            }),
+        )
+    })?;
+
+    Ok(Json(DirectoryResponse {
+        id: directory.id,
+        name: directory.name,
+        parent_id: directory.parent_id,
+        created_at: directory.created_at,
+        updated_at: directory.updated_at,
+        file_count,
+        total_size,
+    }))
+}
+
+// Delete directory handler
+pub async fn delete_directory(
+    State(storage): State<FileStorage>,
+    Path(dir_id): Path<String>,
+) -> Result<Json<DeleteResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let deleted = storage.delete_directory(&dir_id).await.map_err(|e| {
+        error!("Failed to delete directory: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to delete directory: {}", e),
+            }),
+        )
+    })?;
+
+    if deleted {
+        info!("Directory deleted: {}", dir_id);
+        Ok(Json(DeleteResponse {
+            success: true,
+            message: "Directory deleted successfully".to_string(),
+        }))
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Directory not found".to_string(),
+            }),
+        ))
+    }
+}
+
+// Bulk delete handler
+pub async fn bulk_delete(
+    State(storage): State<FileStorage>,
+    Json(payload): Json<BulkDeleteRequest>,
+) -> Result<Json<BulkDeleteResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let (deleted_files, deleted_directories) = storage
+        .bulk_delete(payload.file_ids, payload.directory_ids)
+        .await
+        .map_err(|e| {
+            error!("Failed to bulk delete: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to bulk delete: {}", e),
+                }),
+            )
+        })?;
+
+    info!(
+        "Bulk delete completed: {} files, {} directories",
+        deleted_files, deleted_directories
+    );
+
+    Ok(Json(BulkDeleteResponse {
+        success: true,
+        deleted_files,
+        deleted_directories,
+        message: format!(
+            "Deleted {} files and {} directories",
+            deleted_files, deleted_directories
+        ),
     }))
 }
