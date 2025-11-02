@@ -8,14 +8,11 @@ CREATE TABLE IF NOT EXISTS directories (
     FOREIGN KEY (parent_id) REFERENCES directories(id) ON DELETE CASCADE
 );
 
--- Add parent_directory_id to files table
-ALTER TABLE files ADD COLUMN parent_directory_id TEXT REFERENCES directories(id) ON DELETE CASCADE;
-
 -- Create index on parent_directory_id for faster lookups
-CREATE INDEX idx_files_parent_directory ON files(parent_directory_id);
+CREATE INDEX IF NOT EXISTS idx_files_parent_directory ON files(parent_directory_id);
 
 -- Create index on directories parent_id for faster tree traversal
-CREATE INDEX idx_directories_parent ON directories(parent_id);
+CREATE INDEX IF NOT EXISTS idx_directories_parent ON directories(parent_id);
 
 -- Create index on directory name for search
-CREATE INDEX idx_directories_name ON directories(name);
+CREATE INDEX IF NOT EXISTS idx_directories_name ON directories(name);

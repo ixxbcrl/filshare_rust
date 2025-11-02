@@ -1,4 +1,4 @@
--- Create files table
+-- Create files table with all columns including parent_directory_id
 CREATE TABLE IF NOT EXISTS files (
     id TEXT PRIMARY KEY,
     filename TEXT NOT NULL,
@@ -7,8 +7,9 @@ CREATE TABLE IF NOT EXISTS files (
     mime_type TEXT,
     storage_path TEXT NOT NULL,
     uploaded_at TEXT NOT NULL,
-    description TEXT
+    description TEXT,
+    parent_directory_id TEXT
 );
 
 -- Create index on uploaded_at for faster sorting
-CREATE INDEX idx_files_uploaded_at ON files(uploaded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_files_uploaded_at ON files(uploaded_at DESC);
