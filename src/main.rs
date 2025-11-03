@@ -74,7 +74,7 @@ async fn main() {
         .layer(TraceLayer::new_for_http())
         .with_state(storage);
 
-    let addr = format!("0.0.0.0:{}", port);
+    let addr = format!("[::]:{}", port);
     info!("Server starting on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr)
