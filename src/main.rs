@@ -4,6 +4,7 @@ mod models;
 mod storage;
 
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{delete, get, post},
     Router,
 };
@@ -70,6 +71,7 @@ async fn main() {
         .route("/api/directories/:id", get(handlers::get_directory_info))
         .route("/api/directories/:id", delete(handlers::delete_directory))
         .route("/api/bulk-delete", post(handlers::bulk_delete))
+        .layer(DefaultBodyLimit::max(250 * 1024 * 1024)) // 250MB limit
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(storage);
