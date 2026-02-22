@@ -1,7 +1,7 @@
 use crate::models::{
     BulkDeleteRequest, BulkDeleteResponse, CreateDirectoryRequest, CreateDirectoryResponse,
     DeleteResponse, DirectoryResponse, ErrorResponse, FileResponse, ListFilesResponse,
-    UploadResponse,
+    MoveDirectoryRequest, MoveFileRequest, UploadResponse,
 };
 use crate::storage::FileStorage;
 use axum::{
@@ -458,6 +458,91 @@ pub async fn delete_directory(
             }),
         ))
     }
+}
+
+// Move file handler
+pub async fn move_file(
+    State(storage): State<FileStorage>,
+    Path(file_id): Path<String>,
+    Json(payload): Json<MoveFileRequest>,
+) -> Result<Json<FileResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let metadata = storage
+        .move_file(&file_id, payload.parent_directory_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to move file: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to move file: {}", e),
+                }),
+            )
+        })?;
+
+    let metadata = metadata.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "File not found".to_string(),
+            }),
+        )
+    })?;
+
+    info!("File moved: {}", file_id);
+    Ok(Json(metadata.into()))
+}
+
+// Move directory handler
+pub async fn move_directory(
+    State(storage): State<FileStorage>,
+    Path(dir_id): Path<String>,
+    Json(payload): Json<MoveDirectoryRequest>,
+) -> Result<Json<DirectoryResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let directory = storage
+        .move_directory(&dir_id, payload.parent_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to move directory: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Failed to move directory: {}", e),
+                }),
+            )
+        })?;
+
+    let directory = directory.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Directory not found".to_string(),
+            }),
+        )
+    })?;
+
+    let (file_count, total_size) = storage
+        .get_directory_stats(&dir_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to get directory stats: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get directory stats: {}", e),
+                }),
+            )
+        })?;
+
+    info!("Directory moved: {}", dir_id);
+    Ok(Json(DirectoryResponse {
+        id: directory.id,
+        name: directory.name,
+        parent_id: directory.parent_id,
+        created_at: directory.created_at,
+        updated_at: directory.updated_at,
+        file_count,
+        total_size,
+    }))
 }
 
 // Bulk delete handler

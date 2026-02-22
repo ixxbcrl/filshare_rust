@@ -118,6 +118,16 @@ pub struct BulkDeleteRequest {
     pub directory_ids: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct MoveFileRequest {
+    pub parent_directory_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MoveDirectoryRequest {
+    pub parent_id: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct BulkDeleteResponse {
     pub success: bool,

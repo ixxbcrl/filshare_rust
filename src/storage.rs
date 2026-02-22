@@ -261,6 +261,81 @@ impl FileStorage {
         }
     }
 
+    pub async fn move_file(
+        &self,
+        file_id: &str,
+        parent_directory_id: Option<String>,
+    ) -> Result<Option<FileMetadata>, Box<dyn std::error::Error + Send + Sync>> {
+        let result = sqlx::query(
+            "UPDATE files SET parent_directory_id = ? WHERE id = ?"
+        )
+        .bind(&parent_directory_id)
+        .bind(file_id)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+
+        let metadata = self.get_file_metadata(file_id).await?;
+        info!("File moved: {} -> {:?}", file_id, parent_directory_id);
+        Ok(metadata)
+    }
+
+    pub async fn move_directory(
+        &self,
+        dir_id: &str,
+        parent_id: Option<String>,
+    ) -> Result<Option<Directory>, Box<dyn std::error::Error + Send + Sync>> {
+        // Prevent moving a directory into itself or one of its descendants
+        if let Some(ref target_id) = parent_id {
+            if target_id == dir_id {
+                return Err("Cannot move a directory into itself".into());
+            }
+            if self.is_ancestor_of(dir_id, target_id).await? {
+                return Err("Cannot move a directory into one of its own subdirectories".into());
+            }
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE directories SET parent_id = ?, updated_at = ? WHERE id = ?"
+        )
+        .bind(&parent_id)
+        .bind(&now)
+        .bind(dir_id)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+
+        let directory = self.get_directory(dir_id).await?;
+        info!("Directory moved: {} -> {:?}", dir_id, parent_id);
+        Ok(directory)
+    }
+
+    /// Returns true if `ancestor_id` is an ancestor of `target_id` (walks up the tree).
+    async fn is_ancestor_of(&self, ancestor_id: &str, target_id: &str) -> Result<bool, sqlx::Error> {
+        let mut current = target_id.to_string();
+        loop {
+            match self.get_directory(&current).await? {
+                None => return Ok(false),
+                Some(dir) => match dir.parent_id {
+                    None => return Ok(false),
+                    Some(pid) => {
+                        if pid == ancestor_id {
+                            return Ok(true);
+                        }
+                        current = pid;
+                    }
+                },
+            }
+        }
+    }
+
     pub async fn bulk_delete(
         &self,
         file_ids: Vec<String>,
