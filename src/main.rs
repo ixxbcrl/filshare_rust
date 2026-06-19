@@ -64,6 +64,7 @@ async fn main() {
         .route("/health", get(handlers::health_check))
         .route("/api/files", get(handlers::list_files))
         .route("/api/files", post(handlers::upload_file))
+        .route("/api/files/recent", get(handlers::list_recent_files))
         .route("/api/files/:id", get(handlers::get_file_info))
         .route("/api/files/:id/download", get(handlers::download_file))
         .route("/api/files/:id", delete(handlers::delete_file))
@@ -73,7 +74,7 @@ async fn main() {
         .route("/api/directories/:id", delete(handlers::delete_directory))
         .route("/api/directories/:id", patch(handlers::move_directory))
         .route("/api/bulk-delete", post(handlers::bulk_delete))
-        .layer(DefaultBodyLimit::max(250 * 1024 * 1024)) // 250MB limit
+        .layer(DefaultBodyLimit::disable())
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(storage);

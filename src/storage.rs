@@ -3,7 +3,6 @@ use crate::models::{Directory, FileMetadata};
 use chrono::Utc;
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
 use tracing::info;
 use uuid::Uuid;
 
@@ -24,47 +23,44 @@ impl FileStorage {
         Ok(())
     }
 
-    pub async fn save_file(
-        &self,
-        filename: &str,
-        content: &[u8],
-        mime_type: Option<String>,
-        description: Option<String>,
-        parent_directory_id: Option<String>,
-    ) -> Result<FileMetadata, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn prepare_upload_path(&self, filename: &str) -> (String, PathBuf, String) {
         let file_id = Uuid::new_v4().to_string();
         let extension = Path::new(filename)
             .extension()
             .and_then(|ext| ext.to_str())
             .unwrap_or("");
-
         let stored_filename = if extension.is_empty() {
             file_id.clone()
         } else {
             format!("{}.{}", file_id, extension)
         };
-
         let file_path = self.upload_dir.join(&stored_filename);
+        (file_id, file_path, stored_filename)
+    }
 
-        // Write file to disk
-        let mut file = fs::File::create(&file_path).await?;
-        file.write_all(content).await?;
-        file.flush().await?;
-
-        let file_size = content.len() as i64;
+    pub async fn record_file_metadata(
+        &self,
+        file_id: String,
+        original_filename: String,
+        stored_filename: String,
+        file_path: PathBuf,
+        file_size: i64,
+        mime_type: Option<String>,
+        description: Option<String>,
+        parent_directory_id: Option<String>,
+    ) -> Result<FileMetadata, Box<dyn std::error::Error + Send + Sync>> {
         let uploaded_at = Utc::now().to_rfc3339();
 
-        // Save metadata to database
         let metadata = FileMetadata {
-            id: file_id.clone(),
-            filename: stored_filename.clone(),
-            original_filename: filename.to_string(),
+            id: file_id,
+            filename: stored_filename,
+            original_filename,
             file_size,
-            mime_type: mime_type.clone(),
+            mime_type,
             storage_path: file_path.to_string_lossy().to_string(),
-            uploaded_at: uploaded_at.clone(),
-            description: description.clone(),
-            parent_directory_id: parent_directory_id.clone(),
+            uploaded_at,
+            description,
+            parent_directory_id,
         };
 
         sqlx::query(
@@ -85,7 +81,7 @@ impl FileStorage {
         .execute(&self.pool)
         .await?;
 
-        info!("File saved: {} ({})", filename, file_id);
+        info!("File saved: {} ({})", metadata.original_filename, metadata.id);
         Ok(metadata)
     }
 
@@ -334,6 +330,16 @@ impl FileStorage {
                 },
             }
         }
+    }
+
+    pub async fn list_recent_files(&self, limit: i64) -> Result<Vec<FileMetadata>, sqlx::Error> {
+        sqlx::query_as::<_, FileMetadata>(
+            "SELECT id, filename, original_filename, file_size, mime_type, storage_path, uploaded_at, description, parent_directory_id \
+             FROM files ORDER BY uploaded_at DESC LIMIT ?"
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
     }
 
     pub async fn bulk_delete(

@@ -13,6 +13,7 @@ use axum::{
 };
 use serde::Deserialize;
 use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 use tracing::{error, info};
 
@@ -26,13 +27,14 @@ pub async fn upload_file(
     State(storage): State<FileStorage>,
     mut multipart: Multipart,
 ) -> Result<Json<UploadResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let mut filename = String::new();
-    let mut file_data = Vec::new();
+    let mut original_filename = String::new();
     let mut mime_type: Option<String> = None;
     let mut description: Option<String> = None;
     let mut parent_directory_id: Option<String> = None;
+    // (file_id, file_path, stored_filename, file_size)
+    let mut upload_info: Option<(String, std::path::PathBuf, String, i64)> = None;
 
-    while let Some(field) = multipart
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|e| {
@@ -49,22 +51,55 @@ pub async fn upload_file(
 
         match field_name.as_str() {
             "file" => {
-                filename = field
-                    .file_name()
-                    .unwrap_or("unnamed")
-                    .to_string();
-
+                original_filename = field.file_name().unwrap_or("unnamed").to_string();
                 mime_type = field.content_type().map(|s| s.to_string());
 
-                file_data = field.bytes().await.map_err(|e| {
-                    error!("Failed to read file bytes: {}", e);
+                let (file_id, file_path, stored_filename) =
+                    storage.prepare_upload_path(&original_filename);
+
+                let mut disk_file = tokio::fs::File::create(&file_path).await.map_err(|e| {
+                    error!("Failed to create upload file: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!("Failed to create upload file: {}", e),
+                        }),
+                    )
+                })?;
+
+                let mut total_bytes: i64 = 0;
+                while let Some(chunk) = field.chunk().await.map_err(|e| {
+                    error!("Failed to read file chunk: {}", e);
                     (
                         StatusCode::BAD_REQUEST,
                         Json(ErrorResponse {
                             error: format!("Failed to read file data: {}", e),
                         }),
                     )
-                })?.to_vec();
+                })? {
+                    disk_file.write_all(&chunk).await.map_err(|e| {
+                        error!("Failed to write file chunk: {}", e);
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: format!("Failed to write file data: {}", e),
+                            }),
+                        )
+                    })?;
+                    total_bytes += chunk.len() as i64;
+                }
+
+                disk_file.flush().await.map_err(|e| {
+                    error!("Failed to flush upload file: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!("Failed to finalize file: {}", e),
+                        }),
+                    )
+                })?;
+
+                upload_info = Some((file_id, file_path, stored_filename, total_bytes));
             }
             "description" => {
                 let text = field.text().await.map_err(|e| {
@@ -96,20 +131,30 @@ pub async fn upload_file(
         }
     }
 
-    if filename.is_empty() || file_data.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "No file provided".to_string(),
-            }),
-        ));
-    }
+    let (file_id, file_path, stored_filename, file_size) =
+        upload_info.ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "No file provided".to_string(),
+                }),
+            )
+        })?;
 
     let metadata = storage
-        .save_file(&filename, &file_data, mime_type, description, parent_directory_id)
+        .record_file_metadata(
+            file_id,
+            original_filename,
+            stored_filename,
+            file_path,
+            file_size,
+            mime_type,
+            description,
+            parent_directory_id,
+        )
         .await
         .map_err(|e| {
-            error!("Failed to save file: {}", e);
+            error!("Failed to save file metadata: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -543,6 +588,31 @@ pub async fn move_directory(
         file_count,
         total_size,
     }))
+}
+
+// List recent files handler
+#[derive(Debug, Deserialize)]
+pub struct RecentQuery {
+    pub limit: Option<i64>,
+}
+
+pub async fn list_recent_files(
+    State(storage): State<FileStorage>,
+    Query(query): Query<RecentQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let limit = query.limit.unwrap_or(20).min(100);
+    let files = storage.list_recent_files(limit).await.map_err(|e| {
+        error!("Failed to list recent files: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to list recent files: {}", e),
+            }),
+        )
+    })?;
+    let responses: Vec<FileResponse> = files.into_iter().map(|f| f.into()).collect();
+    let total = responses.len();
+    Ok(Json(serde_json::json!({ "files": responses, "total": total })))
 }
 
 // Bulk delete handler
